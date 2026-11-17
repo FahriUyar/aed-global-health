@@ -16,6 +16,7 @@ const LS = {
   offlineData: 'aedcrm:offline-data:v1',
   cloudCache: 'aedcrm:cloud-cache:v1',
   outbox: 'aedcrm:outbox:v1',
+  presets: 'aedcrm:specialty-presets:v1',
 } as const;
 
 export interface SupabaseConfig {
@@ -124,6 +125,9 @@ export const localStore = {
   writeCache: (data: CRMData) => safeSet(LS.cloudCache, JSON.stringify({ data, savedAt: new Date().toISOString() })),
   readOutbox: <T>() => readJSON<T[]>(LS.outbox) ?? [],
   writeOutbox: <T>(ops: T[]) => (ops.length ? safeSet(LS.outbox, JSON.stringify(ops)) : safeRemove(LS.outbox)),
+  readPresets: <T>() => readJSON<T[]>(LS.presets),
+  writePresets: <T>(presets: T[]) => safeSet(LS.presets, JSON.stringify(presets)),
+  clearPresets: () => safeRemove(LS.presets),
 };
 
 export function isNetworkError(err: unknown): boolean {

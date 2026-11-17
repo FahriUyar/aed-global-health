@@ -9,13 +9,16 @@ import type {
   Hospital,
   HospitalInput,
   Instrument,
+  InstrumentCatalogItem,
   InventoryInput,
   InventoryItem,
+  SpecialtyPreset,
   TableName,
   Visit,
   VisitInput,
 } from '../types/database';
 import { buildSeedData, INSTRUMENT_CATALOG } from '../lib/seedData';
+import { DEFAULT_SPECIALTY_PRESETS } from '../lib/domain';
 import { getSupabase, isForceOffline, isNetworkError, localStore, newId, setForceOffline } from '../lib/supabase';
 import { useToast } from '../components/ui/Toast';
 
@@ -52,6 +55,7 @@ interface OutboxOp {
 export interface SurgeryResult {
   code: string;
   name: string;
+  quantity: number;
   status: 'decremented' | 'missing' | 'empty';
   itemId?: string;
   remainingActive?: number;
@@ -62,6 +66,7 @@ export interface SurgeryResult {
 
 interface CRMContextValue {
   data: CRMData;
+  specialtyPresets: SpecialtyPreset[];
   mode: Mode;
   authState: AuthState;
   session: Session | null;
@@ -76,6 +81,13 @@ interface CRMContextValue {
   refresh: () => Promise<void>;
   uploadLocalToCloud: () => Promise<void>;
   resetLocalData: () => void;
+  // Enstrüman Kataloğu & Vaka Setleri
+  addInstrument: (instrument: InstrumentCatalogItem) => Promise<void>;
+  updateInstrument: (code: string, updates: Partial<InstrumentCatalogItem>) => Promise<void>;
+  deleteInstrument: (code: string) => Promise<void>;
+  resetCatalogToDefaults: () => Promise<void>;
+  updateSpecialtyPresets: (presets: SpecialtyPreset[]) => void;
+  resetSpecialtyPresets: () => void;
   // Hastaneler
   addHospital: (input: HospitalInput) => Promise<Hospital>;
   updateHospital: (id: string, patch: Partial<HospitalInput>) => Promise<void>;
@@ -90,7 +102,7 @@ interface CRMContextValue {
   deleteInventory: (id: string) => Promise<void>;
   consumeOne: (id: string) => Promise<{ needsBoxPrompt: boolean } | null>;
   openNewBox: (id: string) => Promise<boolean>;
-  applySurgeryCase: (hospitalId: string, codes: string[]) => Promise<SurgeryResult[]>;
+  applySurgeryCase: (hospitalId: string, items: (string | { code: string; quantity?: number })[]) => Promise<SurgeryResult[]>;
   // Ziyaretler
   addVisit: (input: VisitInput) => Promise<Visit>;
   updateVisit: (id: string, patch: Partial<VisitInput>) => Promise<void>;
@@ -110,18 +122,34 @@ function normalizeNumbers(data: CRMData): CRMData {
   // Supabase NUMERIC kolonları string dönebilir → sayıya çevir
   return {
     ...data,
-    catalog: (data.catalog?.length ? data.catalog : INSTRUMENT_CATALOG).map((c) => ({
-      ...c,
-      diameter_mm: Number(c.diameter_mm ?? 8),
-      default_max_uses: Number(c.default_max_uses),
-      unit_list_price_usd: Number(c.unit_list_price_usd ?? 0),
-    })),
+    catalog: (data.catalog?.length ? data.catalog : INSTRUMENT_CATALOG).map((c) => {
+      const dm = Number(c.diameter_mm ?? 8);
+      return {
+        ...c,
+        diameter_mm: Number.isFinite(dm) && dm > 0 ? dm : 8,
+        shaft_diameter: c.shaft_diameter?.trim() || `${Number.isFinite(dm) && dm > 0 ? dm : 8} mm`,
+        default_max_uses: Math.max(1, Number(c.default_max_uses) || 1),
+        unit_list_price_usd: Math.max(0, Number(c.unit_list_price_usd ?? 0)),
+        sut_code: c.sut_code ?? null,
+        tender_spec_notes: c.tender_spec_notes ?? null,
+        competitor_comparison: c.competitor_comparison ?? null,
+        image_url: c.image_url ?? null,
+      };
+    }),
     inventory: (data.inventory ?? []).map((i) => ({ ...i, avg_uses_per_week: Number(i.avg_uses_per_week ?? 0) })),
     deals: (data.deals ?? []).map((d) => ({ ...d, total_amount_usd: Number(d.total_amount_usd ?? 0) })),
     hospitals: data.hospitals ?? [],
     contacts: data.contacts ?? [],
     visits: data.visits ?? [],
   };
+}
+
+function loadPresets(): SpecialtyPreset[] {
+  const stored = localStore.readPresets<SpecialtyPreset>();
+  if (stored && Array.isArray(stored) && stored.length > 0 && Array.isArray(stored[0].items)) {
+    return stored;
+  }
+  return structuredClone(DEFAULT_SPECIALTY_PRESETS);
 }
 
 function loadLocalData(): CRMData {
@@ -137,6 +165,7 @@ export function CRMProvider({ children }: { children: ReactNode }) {
   const supabase = useMemo(() => getSupabase(), []);
   const [data, setData] = useState<CRMData>(EMPTY);
   const dataRef = useRef<CRMData>(EMPTY);
+  const [specialtyPresets, setSpecialtyPresets] = useState<SpecialtyPreset[]>(loadPresets);
   const [mode, setMode] = useState<Mode>('loading');
   const modeRef = useRef<Mode>('loading');
   const [authState, setAuthState] = useState<AuthState>(supabase && !isForceOffline() ? 'checking' : 'n/a');
@@ -408,31 +437,54 @@ export function CRMProvider({ children }: { children: ReactNode }) {
   );
 
   const applySurgeryCase = useCallback<CRMContextValue['applySurgeryCase']>(
-    async (hospitalId, codes) => {
+    async (hospitalId, items) => {
       const results: SurgeryResult[] = [];
-      for (const code of codes) {
+      for (const entry of items) {
+        const code = typeof entry === 'string' ? entry : entry.code;
+        const quantity = Math.max(1, Math.round(typeof entry === 'string' ? 1 : (entry.quantity ?? 1)));
         const name = dataRef.current.catalog.find((c) => c.code === code)?.name_tr ?? code;
         const item = dataRef.current.inventory.find((i) => i.hospital_id === hospitalId && i.instrument_code === code);
         if (!item) {
-          results.push({ code, name, status: 'missing', needsBoxPrompt: false });
+          results.push({ code, name, quantity, status: 'missing', needsBoxPrompt: false });
           continue;
         }
         const disposable = maxUsesOf(code) === 1;
         const empty = disposable ? item.boxed_stock_count <= 0 : item.active_instrument_remaining_uses <= 0;
         if (empty) {
-          results.push({ code, name, status: 'empty', itemId: item.id, remainingActive: item.active_instrument_remaining_uses, boxed: item.boxed_stock_count, needsBoxPrompt: !disposable && item.boxed_stock_count > 0 });
+          results.push({
+            code,
+            name,
+            quantity,
+            status: 'empty',
+            itemId: item.id,
+            remainingActive: item.active_instrument_remaining_uses,
+            boxed: item.boxed_stock_count,
+            needsBoxPrompt: !disposable && item.boxed_stock_count > 0,
+          });
           continue;
         }
-        const r = await consumeOne(item.id);
+        let needsBoxPrompt = false;
+        for (let q = 0; q < quantity; q += 1) {
+          const current = dataRef.current.inventory.find((i) => i.id === item.id);
+          if (!current) break;
+          const isDepleted = disposable ? current.boxed_stock_count <= 0 : current.active_instrument_remaining_uses <= 0;
+          if (isDepleted) {
+            if (!disposable && current.boxed_stock_count > 0) needsBoxPrompt = true;
+            break;
+          }
+          const r = await consumeOne(item.id);
+          if (r?.needsBoxPrompt) needsBoxPrompt = true;
+        }
         const after = dataRef.current.inventory.find((i) => i.id === item.id)!;
         results.push({
           code,
           name,
+          quantity,
           status: 'decremented',
           itemId: item.id,
           remainingActive: after.active_instrument_remaining_uses,
           boxed: after.boxed_stock_count,
-          needsBoxPrompt: !!r?.needsBoxPrompt,
+          needsBoxPrompt,
         });
       }
       return results;
@@ -441,14 +493,151 @@ export function CRMProvider({ children }: { children: ReactNode }) {
     [consumeOne],
   );
 
+  // ---------------- Katalog CRUD & Vaka Seti İşlemleri ----------------
+  const sanitizeInstrument = (inst: InstrumentCatalogItem): InstrumentCatalogItem => {
+    const shaft = inst.shaft_diameter?.trim() || `${Number(inst.diameter_mm) || 8} mm`;
+    const parsedMm = Number.parseFloat(shaft.replace(',', '.'));
+    return {
+      ...inst,
+      code: inst.code.trim().toUpperCase(),
+      name_tr: inst.name_tr.trim(),
+      name_en: inst.name_en.trim() || inst.name_tr.trim(),
+      category: inst.category.trim(),
+      shaft_diameter: shaft,
+      diameter_mm: Number.isFinite(parsedMm) && parsedMm > 0 ? parsedMm : Number(inst.diameter_mm) || 8,
+      default_max_uses: Math.max(1, Math.round(Number(inst.default_max_uses) || 1)),
+      unit_list_price_usd: Math.max(0, Number(inst.unit_list_price_usd) || 0),
+      clinical_usage_description: inst.clinical_usage_description.trim(),
+      typical_branches: inst.typical_branches?.trim() || null,
+      sut_code: inst.sut_code?.trim() || null,
+      tender_spec_notes: inst.tender_spec_notes?.trim() || null,
+      competitor_comparison: inst.competitor_comparison?.trim() || null,
+      image_url: inst.image_url?.trim() || null,
+    };
+  };
+
+  const updateSpecialtyPresets = useCallback((presets: SpecialtyPreset[]) => {
+    setSpecialtyPresets(presets);
+    localStore.writePresets(presets);
+  }, []);
+
+  const resetSpecialtyPresets = useCallback(() => {
+    const defaults = structuredClone(DEFAULT_SPECIALTY_PRESETS);
+    setSpecialtyPresets(defaults);
+    localStore.clearPresets();
+  }, []);
+
+  const addInstrument = useCallback<CRMContextValue['addInstrument']>(
+    async (instrument) => {
+      const clean = sanitizeInstrument(instrument);
+      if (dataRef.current.catalog.some((c) => c.code.toUpperCase() === clean.code)) {
+        notify(`${clean.code} kodlu bir enstrüman katalogda zaten mevcut.`, 'error');
+        throw new Error('Duplicate instrument code');
+      }
+      commitData((prev) => ({ ...prev, catalog: [clean, ...prev.catalog] }));
+      await persist({
+        table: 'instrument_catalog',
+        kind: 'insert',
+        id: clean.code,
+        payload: clean as unknown as Record<string, unknown>,
+      });
+    },
+    [commitData, persist, notify],
+  );
+
+  const updateInstrument = useCallback<CRMContextValue['updateInstrument']>(
+    async (code, updates) => {
+      const existing = dataRef.current.catalog.find((c) => c.code === code);
+      if (!existing) return;
+      const merged = sanitizeInstrument({ ...existing, ...updates, code: updates.code ?? existing.code });
+      const codeChanged = merged.code !== code;
+      if (codeChanged && dataRef.current.catalog.some((c) => c.code !== code && c.code.toUpperCase() === merged.code)) {
+        notify(`${merged.code} kodu başka bir enstrümanda kullanılıyor.`, 'error');
+        throw new Error('Duplicate instrument code');
+      }
+      commitData((prev) => ({
+        ...prev,
+        catalog: prev.catalog.map((c) => (c.code === code ? merged : c)),
+        inventory: codeChanged
+          ? prev.inventory.map((i) => (i.instrument_code === code ? { ...i, instrument_code: merged.code } : i))
+          : prev.inventory,
+      }));
+      if (codeChanged) {
+        setSpecialtyPresets((prev) => {
+          const next = prev.map((p) => ({
+            ...p,
+            items: p.items.map((it) => (it.code === code ? { ...it, code: merged.code } : it)),
+          }));
+          localStore.writePresets(next);
+          return next;
+        });
+        await persist({
+          table: 'instrument_catalog',
+          kind: 'insert',
+          id: merged.code,
+          payload: merged as unknown as Record<string, unknown>,
+        });
+        await persist({ table: 'instrument_catalog', kind: 'delete', id: code });
+      } else {
+        await persist({
+          table: 'instrument_catalog',
+          kind: 'update',
+          id: code,
+          payload: merged as unknown as Record<string, unknown>,
+        });
+      }
+    },
+    [commitData, persist, notify],
+  );
+
+  const deleteInstrument = useCallback<CRMContextValue['deleteInstrument']>(
+    async (code) => {
+      commitData((prev) => ({
+        ...prev,
+        catalog: prev.catalog.filter((c) => c.code !== code),
+        inventory: prev.inventory.filter((i) => i.instrument_code !== code),
+      }));
+      setSpecialtyPresets((prev) => {
+        const next = prev.map((p) => ({ ...p, items: p.items.filter((it) => it.code !== code) }));
+        localStore.writePresets(next);
+        return next;
+      });
+      await persist({ table: 'instrument_catalog', kind: 'delete', id: code });
+    },
+    [commitData, persist],
+  );
+
+  const resetCatalogToDefaults = useCallback<CRMContextValue['resetCatalogToDefaults']>(async () => {
+    const defaults = structuredClone(INSTRUMENT_CATALOG);
+    commitData((prev) => ({ ...prev, catalog: defaults }));
+    resetSpecialtyPresets();
+    if (modeRef.current !== 'local') {
+      for (const row of defaults) {
+        await persist({
+          table: 'instrument_catalog',
+          kind: 'insert',
+          id: row.code,
+          payload: row as unknown as Record<string, unknown>,
+        });
+      }
+    }
+  }, [commitData, persist, resetSpecialtyPresets]);
+
   const value: CRMContextValue = {
     data,
+    specialtyPresets,
     mode,
     authState,
     session,
     pendingOps,
     lastSyncedAt,
     instrumentByCode,
+    addInstrument,
+    updateInstrument,
+    deleteInstrument,
+    resetCatalogToDefaults,
+    updateSpecialtyPresets,
+    resetSpecialtyPresets,
 
     signIn: async (email, password) => {
       if (!supabase) return 'Supabase yapılandırılmamış.';
@@ -487,6 +676,10 @@ export function CRMProvider({ children }: { children: ReactNode }) {
       if (!supabase || modeRef.current !== 'cloud') throw new Error('Önce Supabase oturumu açılmalı.');
       const local = localStore.readOffline();
       if (!local) throw new Error('Yüklenecek yerel veri bulunamadı.');
+      if (local.catalog?.length) {
+        const { error } = await supabase.from('instrument_catalog').upsert(local.catalog as unknown as Record<string, unknown>[]);
+        if (error) throw error;
+      }
       const order: DataKey[] = ['hospitals', 'contacts', 'inventory', 'visits', 'deals'];
       for (const key of order) {
         const rows = local[key];
@@ -499,6 +692,7 @@ export function CRMProvider({ children }: { children: ReactNode }) {
     resetLocalData: () => {
       const seed = buildSeedData();
       localStore.writeOffline(seed);
+      resetSpecialtyPresets();
       if (modeRef.current === 'local') commitData(() => seed);
     },
 

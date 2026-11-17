@@ -145,16 +145,47 @@ export interface Contact {
   created_at: string;
 }
 
+export const SPECIALTY_TAGS = [
+  'Tüm Branşlar',
+  'Üroloji',
+  'Genel Cerrahi',
+  'Jinekoloji',
+  'Göğüs Cerrahisi',
+  'Pediatrik Cerrahi',
+  'Bariatrik',
+  'Kolorektal',
+] as const;
+
 export interface Instrument {
   code: string;
   name_en: string;
   name_tr: string;
-  category: InstrumentCategory;
+  category: InstrumentCategory | string;
   diameter_mm: number;
+  shaft_diameter?: string | null;
   default_max_uses: number;
   unit_list_price_usd: number;
   clinical_usage_description: string;
   typical_branches: string | null;
+  sut_code?: string | null;
+  tender_spec_notes?: string | null;
+  competitor_comparison?: string | null;
+  image_url?: string | null;
+}
+
+export type InstrumentCatalogItem = Instrument;
+
+export interface SpecialtyPresetItem {
+  code: string;
+  quantity: number;
+}
+
+export interface SpecialtyPreset {
+  id: string;
+  branch: string;
+  title: string;
+  procedures: string;
+  items: SpecialtyPresetItem[];
 }
 
 export interface InventoryItem {

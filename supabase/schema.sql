@@ -66,22 +66,26 @@ CREATE TABLE instrument_catalog (
   code TEXT PRIMARY KEY, -- Örn: IN8036
   name_en TEXT NOT NULL,
   name_tr TEXT NOT NULL,
-  category TEXT NOT NULL CHECK (category IN (
-    'İğne Tutucu (Needle Driver)', 
-    'Bipolar Enerji', 
-    'Monopolar Enerji', 
-    'Doku Tutucu (Grasper)', 
-    'Klip Aplikatörü', 
-    'Ultrasonik Enerji', 
-    'Tam Sarf (Disposable)', 
-    'Eğitim Serisi (-T)'
-  )),
+  category TEXT NOT NULL,
   diameter_mm NUMERIC DEFAULT 8.0,
+  shaft_diameter TEXT DEFAULT '8 mm', -- Düzenlenebilir şaft çapı (örn: 8 mm, 5 mm, 12 mm, Standart)
   default_max_uses INT NOT NULL, -- Standart maksimum kullanım (can) sayısı (1, 10, 12, 16, 20, 30)
   unit_list_price_usd NUMERIC DEFAULT 0, -- Tahmini liste fiyatı ($)
   clinical_usage_description TEXT NOT NULL,
-  typical_branches TEXT -- En çok kullanıldığı branşlar
+  typical_branches TEXT, -- En çok kullanıldığı branşlar
+  sut_code TEXT, -- Sağlık Uygulama Tebliği / ÜTS Barkod veya SUT Kodu
+  tender_spec_notes TEXT, -- Teknik şartnameye yazdırılacak kritik özellik/madde notu
+  competitor_comparison TEXT, -- Da Vinci muadiline göre avantaj notu
+  image_url TEXT -- İsteğe bağlı ürün görseli linki
 );
+
+-- Mevcut veritabanları için güvenli şema genişletme (idempotent migration)
+ALTER TABLE instrument_catalog DROP CONSTRAINT IF EXISTS instrument_catalog_category_check;
+ALTER TABLE instrument_catalog ADD COLUMN IF NOT EXISTS shaft_diameter TEXT DEFAULT '8 mm';
+ALTER TABLE instrument_catalog ADD COLUMN IF NOT EXISTS sut_code TEXT;
+ALTER TABLE instrument_catalog ADD COLUMN IF NOT EXISTS tender_spec_notes TEXT;
+ALTER TABLE instrument_catalog ADD COLUMN IF NOT EXISTS competitor_comparison TEXT;
+ALTER TABLE instrument_catalog ADD COLUMN IF NOT EXISTS image_url TEXT;
 
 -- 4. HASTANE DEPO VE ENSTRÜMAN "CAN (RFID KONTÖR)" TAKİBİ (hospital_inventory)
 CREATE TABLE hospital_inventory (
@@ -208,7 +212,8 @@ ALTER TABLE deals_orders ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "auth_all_hospitals" ON hospitals FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all_contacts" ON contacts FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_read_catalog" ON instrument_catalog FOR SELECT TO authenticated USING (true);
+DROP POLICY IF EXISTS "auth_read_catalog" ON instrument_catalog;
+CREATE POLICY "auth_all_catalog" ON instrument_catalog FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all_inventory" ON hospital_inventory FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all_visits" ON visits FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all_deals" ON deals_orders FOR ALL TO authenticated USING (true) WITH CHECK (true);

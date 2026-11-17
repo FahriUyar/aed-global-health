@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import type { Attitude, Hospital, Instrument, InventoryItem, PipelineStage } from '../types/database';
+import type { Attitude, Hospital, Instrument, InventoryItem, PipelineStage, SpecialtyPreset } from '../types/database';
 
 export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs));
@@ -85,36 +85,60 @@ export function forecastInventory(item: InventoryItem, instrument: Instrument | 
 // ---------------------------------------------------------------------------
 // Branşa göre hazır vaka setleri
 // ---------------------------------------------------------------------------
-export interface CaseSet {
-  id: string;
-  branch: string;
-  title: string;
-  procedures: string;
-  codes: string[];
-}
+export type CaseSet = SpecialtyPreset;
 
-export const CASE_SETS: CaseSet[] = [
-  { id: 'uro', branch: 'Üroloji', title: 'Üroloji Seti', procedures: 'Radikal Prostatektomi / Parsiyel Nefrektomi', codes: ['IN8035', 'IN8036', 'IN803B', 'IN8038', 'IN803G', 'DRAPE-SET', 'SEAL-SET'] },
-  { id: 'gs', branch: 'Genel Cerrahi', title: 'Genel Cerrahi Seti', procedures: 'Kolorektal / Gastrektomi / Bariatrik', codes: ['IN8035', 'IN8033', 'IN803A', 'IN8031', 'IN803C', 'DRAPE-SET', 'SEAL-SET'] },
-  { id: 'gyn', branch: 'Jinekoloji', title: 'Jinekoloji Seti', procedures: 'Histerektomi / Miyomektomi', codes: ['IN8035', 'IN8036', 'IN803D', 'IN8038', 'DRAPE-SET', 'SEAL-SET'] },
-  { id: 'tho', branch: 'Göğüs & Pediatrik', title: 'Göğüs & Pediatrik Cerrahi Seti', procedures: 'Lobektomi / Timektomi / Pyeloplasti', codes: ['IN8032', 'IN8036', 'IN803A', 'IN8031-M', 'DRAPE-SET', 'SEAL-SET'] },
+const toItems = (codes: string[]) => codes.map((code) => ({ code, quantity: 1 }));
+
+export const DEFAULT_SPECIALTY_PRESETS: SpecialtyPreset[] = [
+  { id: 'uro', branch: 'Üroloji', title: 'Üroloji Seti', procedures: 'Radikal Prostatektomi / Parsiyel Nefrektomi', items: toItems(['IN8035', 'IN8036', 'IN803B', 'IN8038', 'IN803G', 'DRAPE-SET', 'SEAL-SET']) },
+  { id: 'gs', branch: 'Genel Cerrahi', title: 'Genel Cerrahi Seti', procedures: 'Kolorektal / Gastrektomi / Bariatrik', items: toItems(['IN8035', 'IN8033', 'IN803A', 'IN8031', 'IN803C', 'DRAPE-SET', 'SEAL-SET']) },
+  { id: 'gyn', branch: 'Jinekoloji', title: 'Jinekoloji Seti', procedures: 'Histerektomi / Miyomektomi', items: toItems(['IN8035', 'IN8036', 'IN803D', 'IN8038', 'DRAPE-SET', 'SEAL-SET']) },
+  { id: 'tho', branch: 'Göğüs & Pediatrik', title: 'Göğüs & Pediatrik Cerrahi Seti', procedures: 'Lobektomi / Timektomi / Pyeloplasti', items: toItems(['IN8032', 'IN8036', 'IN803A', 'IN8031-M', 'DRAPE-SET', 'SEAL-SET']) },
 ];
 
-/** Vaka başı sarf maliyeti: yeniden kullanılabilir alet fiyatı / maks. can + tek kullanımlıkların tam fiyatı */
-export function caseSetCost(set: CaseSet, catalog: Instrument[]): { total: number; lines: { instrument: Instrument; perCase: number }[] } {
-  const lines = set.codes
-    .map((code) => catalog.find((c) => c.code === code))
-    .filter((x): x is Instrument => !!x)
-    .map((instrument) => ({ instrument, perCase: instrument.unit_list_price_usd / Math.max(1, instrument.default_max_uses) }));
-  return { total: lines.reduce((s, l) => s + l.perCase, 0), lines };
+export const CASE_SETS = DEFAULT_SPECIALTY_PRESETS;
+
+/** Vaka başı sarf maliyeti: (birim liste fiyatı / maks. can) × setteki kullanım adedi */
+export function caseSetCost(
+  set: SpecialtyPreset,
+  catalog: Instrument[],
+): { total: number; totalUnits: number; lines: { instrument: Instrument; quantity: number; unitPerCase: number; perCase: number }[] } {
+  const lines = set.items
+    .map(({ code, quantity }) => {
+      const instrument = catalog.find((c) => c.code === code);
+      if (!instrument || quantity <= 0) return null;
+      const qty = Math.max(1, Math.round(quantity));
+      const unitPerCase = (Number(instrument.unit_list_price_usd) || 0) / Math.max(1, Number(instrument.default_max_uses) || 1);
+      return { instrument, quantity: qty, unitPerCase, perCase: unitPerCase * qty };
+    })
+    .filter((x): x is { instrument: Instrument; quantity: number; unitPerCase: number; perCase: number } => !!x);
+  return {
+    total: lines.reduce((s, l) => s + l.perCase, 0),
+    totalUnits: lines.reduce((s, l) => s + l.quantity, 0),
+    lines,
+  };
 }
 
-/** Setteki yeniden kullanılabilir aletlerin ortalama can ömrü */
-export function averageReusableLife(set: CaseSet, catalog: Instrument[]): number {
-  const lives = set.codes
-    .map((code) => catalog.find((c) => c.code === code)?.default_max_uses ?? 0)
-    .filter((n) => n > 1);
-  return lives.length ? lives.reduce((a, b) => a + b, 0) / lives.length : 10;
+/** Setteki yeniden kullanılabilir aletlerin adet ağırlıklı ortalama can ömrü */
+export function averageReusableLife(set: SpecialtyPreset, catalog: Instrument[]): number {
+  let weightedSum = 0;
+  let totalCount = 0;
+  for (const { code, quantity } of set.items) {
+    const uses = Number(catalog.find((c) => c.code === code)?.default_max_uses ?? 0);
+    const qty = Math.max(1, Math.round(quantity || 1));
+    if (uses > 1) {
+      weightedSum += uses * qty;
+      totalCount += qty;
+    }
+  }
+  return totalCount > 0 ? weightedSum / totalCount : 10;
+}
+
+/** Şaft çapı metnini görüntüler (örn. "8 mm") */
+export function formatShaftDiameter(inst: Pick<Instrument, 'shaft_diameter' | 'diameter_mm'>): string {
+  const s = inst.shaft_diameter?.trim();
+  if (s) return s;
+  return `${inst.diameter_mm ?? 8} mm`;
 }
 
 // ---------------------------------------------------------------------------

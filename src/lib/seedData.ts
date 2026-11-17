@@ -27,7 +27,15 @@ const rows: CatalogRow[] = [
   { code: 'SEAL-SET', name_en: '8mm Force Sensing Trocar Cannula Seal', name_tr: '8mm Trokar Kanül Contası ve Valf Seti', category: 'Tam Sarf (Disposable)', default_max_uses: 1, unit_list_price_usd: 95, clinical_usage_description: 'Hastanın karnındaki karbondioksit gazının kaçmasını önleyen tek kullanımlık trokar contasıdır.', typical_branches: 'Tüm Branşlar' },
 ];
 
-export const INSTRUMENT_CATALOG: Instrument[] = rows.map((r) => ({ ...r, diameter_mm: 8 }));
+export const INSTRUMENT_CATALOG: Instrument[] = rows.map((r) => ({
+  ...r,
+  diameter_mm: 8,
+  shaft_diameter: '8 mm',
+  sut_code: null,
+  tender_spec_notes: null,
+  competitor_comparison: null,
+  image_url: null,
+}));
 
 // ---------------------------------------------------------------------------
 // 2) TÜRKİYE ÖRNEK HASTANE / KİŞİ / STOK / ZİYARET / TEKLİF VERİLERİ (çevrimdışı mod)

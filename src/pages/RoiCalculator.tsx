@@ -1,15 +1,15 @@
 import { useMemo, useState } from 'react';
-import { Bot, DollarSign, Hourglass, Percent, Printer, TrendingDown } from 'lucide-react';
+import { Bot, DollarSign, Hourglass, Percent, Printer, RefreshCw, TrendingDown } from 'lucide-react';
 import { useCRM } from '../context/CRMContext';
 import { useDocumentMeta } from '../hooks/useDocumentMeta';
 import { Badge, Card, PageHeader, SelectField, TextField, btn } from '../components/ui';
-import { CASE_SETS, averageReusableLife, cn, fmtNum, fmtTRY, fmtUSD, todayISO } from '../lib/domain';
+import { averageReusableLife, caseSetCost, cn, fmtNum, fmtTRY, fmtUSD, todayISO } from '../lib/domain';
 
 type Model = 'capex' | 'reagent';
 
 export default function RoiCalculator() {
   useDocumentMeta('Canlı ROI & Maliyet Avantajı Simülatörü', 'Toumai® MT-1000 ile Da Vinci X/Xi arasındaki yıllık ve 5 yıllık sarf, enstrüman ömrü ve toplam sahip olma maliyeti karşılaştırması.');
-  const { data } = useCRM();
+  const { data, specialtyPresets } = useCRM();
 
   const [selectedHospId, setSelectedHospId] = useState<string>('');
   const [hospitalTitle, setHospitalTitle] = useState('Örnek Şehir / Üniversite Hastanesi');
@@ -18,9 +18,24 @@ export default function RoiCalculator() {
   const [gyn, setGyn] = useState(10);
   const [model, setModel] = useState<Model>('capex');
   const [davinciPerCase, setDavinciPerCase] = useState(2650);
-  const [toumaiPerCase, setToumaiPerCase] = useState(1450);
+  const [customToumaiPerCase, setCustomToumaiPerCase] = useState<number | null>(null);
   const [capexDiff, setCapexDiff] = useState(450000); // Yatırım / geri dönüş hesabı için baz tutar ($)
   const [usdTry, setUsdTry] = useState(38.5);
+
+  const uroSet = specialtyPresets.find((s) => s.id === 'uro') ?? specialtyPresets[0];
+  const gsSet = specialtyPresets.find((s) => s.id === 'gs') ?? specialtyPresets[1] ?? specialtyPresets[0];
+  const gynSet = specialtyPresets.find((s) => s.id === 'gyn') ?? specialtyPresets[2] ?? specialtyPresets[0];
+
+  const liveCatalogWeightedPerCase = useMemo(() => {
+    const monthly = uro + gs + gyn;
+    const uroCost = uroSet ? caseSetCost(uroSet, data.catalog).total : 850;
+    const gsCost = gsSet ? caseSetCost(gsSet, data.catalog).total : 1600;
+    const gynCost = gynSet ? caseSetCost(gynSet, data.catalog).total : 750;
+    if (monthly <= 0) return Math.round((uroCost + gsCost + gynCost) / 3);
+    return Math.round((uro * uroCost + gs * gsCost + gyn * gynCost) / monthly);
+  }, [uro, gs, gyn, uroSet, gsSet, gynSet, data.catalog]);
+
+  const toumaiPerCase = customToumaiPerCase ?? liveCatalogWeightedPerCase;
 
   const loadHospital = (id: string) => {
     setSelectedHospId(id);
@@ -38,9 +53,9 @@ export default function RoiCalculator() {
     const annualCases = monthlyCases * 12;
 
     // Branş ağırlıklı ortalama yeniden kullanılabilir enstrüman ömrü (Toumai 12-20 can vs Da Vinci 10 can)
-    const uroLife = averageReusableLife(CASE_SETS[0], data.catalog);
-    const gsLife = averageReusableLife(CASE_SETS[1], data.catalog);
-    const gynLife = averageReusableLife(CASE_SETS[2], data.catalog);
+    const uroLife = uroSet ? averageReusableLife(uroSet, data.catalog) : 16;
+    const gsLife = gsSet ? averageReusableLife(gsSet, data.catalog) : 16;
+    const gynLife = gynSet ? averageReusableLife(gynSet, data.catalog) : 16;
     const weightedToumaiLife = monthlyCases > 0 ? (uro * uroLife + gs * gsLife + gyn * gynLife) / monthlyCases : 16.5;
     const davinciLife = 10;
 
@@ -76,7 +91,7 @@ export default function RoiCalculator() {
       fiveYearSavingsUSD,
       paybackMonths,
     };
-  }, [uro, gs, gyn, model, davinciPerCase, toumaiPerCase, capexDiff, data.catalog]);
+  }, [uro, gs, gyn, model, davinciPerCase, toumaiPerCase, capexDiff, uroSet, gsSet, gynSet, data.catalog]);
 
   const maxBar = Math.max(1, calc.annualDavinciUSD, calc.annualToumaiUSD);
 
@@ -157,16 +172,32 @@ export default function RoiCalculator() {
               value={davinciPerCase}
               onChange={(e) => setDavinciPerCase(Math.max(0, Number(e.target.value) || 0))}
             />
-            <TextField
-              label="Toumai® Baz Vaka Başı Sarf ($)"
-              id="roi-tm"
-              type="number"
-              min={300}
-              step={50}
-              inputMode="numeric"
-              value={toumaiPerCase}
-              onChange={(e) => setToumaiPerCase(Math.max(0, Number(e.target.value) || 0))}
-            />
+            <div>
+              <TextField
+                label="Toumai® Baz Vaka Başı Sarf ($)"
+                id="roi-tm"
+                type="number"
+                min={100}
+                step={25}
+                inputMode="numeric"
+                hint={
+                  customToumaiPerCase === null
+                    ? `Katalog & vaka setlerinden otomatik: ${fmtUSD(liveCatalogWeightedPerCase)}`
+                    : `Katalog hesabı: ${fmtUSD(liveCatalogWeightedPerCase)}`
+                }
+                value={toumaiPerCase}
+                onChange={(e) => setCustomToumaiPerCase(Math.max(0, Number(e.target.value) || 0))}
+              />
+              {customToumaiPerCase !== null && (
+                <button
+                  type="button"
+                  onClick={() => setCustomToumaiPerCase(null)}
+                  className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-medical hover:underline"
+                >
+                  <RefreshCw aria-hidden="true" className="size-3" /> Canlı katalog fiyatına sıfırla ({fmtUSD(liveCatalogWeightedPerCase)})
+                </button>
+              )}
+            </div>
             {model === 'capex' && (
               <TextField
                 label="Amortisman Baz Yatırım ($)"
